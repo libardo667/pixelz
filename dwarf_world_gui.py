@@ -89,10 +89,10 @@ NAME_POOL = [
 REPRODUCTION_AGE = 20
 REPRODUCTION_PROBABILITY = 0.1
 DEATH_AGE = 100
-HUNGER_THRESHOLD = 3
+HUNGER_THRESHOLD = 20
 
 # Threshold for thirst (analogous to hunger)
-THIRST_THRESHOLD = 3
+THIRST_THRESHOLD = 20
 
 # Steps required for resources to regrow after harvesting or drinking
 REGROW_STEPS: Dict[str, int] = {
@@ -159,16 +159,16 @@ class Character:
         self.x: int = x
         self.y: int = y
         self.age: int = 0
-        self.hunger: int = random.randint(5, 20)
+        self.hunger: int = random.randint(80, 100)
         # Initialise thirst in the same range as hunger.  Characters will seek water when thirsty.
-        self.thirst: int = random.randint(5, 20)
+        self.thirst: int = random.randint(80, 100)
         # ``horny`` indicates readiness to reproduce.  It is initially set based on
         # being satiated at construction but will be updated each step in
         # ``World.character_step``.  A character can only be horny when fully
         # satiated (hunger and thirst above their thresholds) and not carrying
         # any resource.  The initial value uses a 50% chance for variety but
         # does not otherwise influence behaviour.
-        self.horny: bool = self.hunger > HUNGER_THRESHOLD and self.thirst > THIRST_THRESHOLD and random.random() < 0.5
+        self.horny: bool = self.age >= REPRODUCTION_AGE and self.hunger > HUNGER_THRESHOLD and self.thirst > THIRST_THRESHOLD and random.random() < 0.5
         # Resource currently being carried for deposit.  ``None`` means not carrying anything.
         self.carrying: Optional[str] = None
         # When satiated, characters pick a resource type to stockpile.  ``None`` indicates no current target.

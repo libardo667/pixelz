@@ -1,0 +1,6 @@
+# Generated character state files
+character_states/
+__pycache__/
+*.pyc
+.env
+*.log
