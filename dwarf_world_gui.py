@@ -480,15 +480,45 @@ class World:
                     self.tiles[char.x][char.y] = "empty"
                     self.regrowth[(char.x, char.y)] = (tile_resource, REGROW_STEPS[tile_resource])
                     harvested = True
-        # Reproduction if age threshold met and the character is reasonably satiated
-        if char.age >= REPRODUCTION_AGE and char.hunger > HUNGER_THRESHOLD and char.thirst > THIRST_THRESHOLD and self.has_neighbors(char):
-            if random.random() < REPRODUCTION_PROBABILITY and char.horny:
-                # Find an adjacent empty tile for offspring
-                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                    nx, ny = char.x + dx, char.y + dy
-                    if 0 <= nx < self.width and 0 <= ny < self.height and self.is_empty(nx, ny):
-                        offspring_name = generate_name()
-                        self.add_character(offspring_name, nx, ny)
+        # Update horniness state based on satiation.  Characters only become
+        # "horny" when fully satiated (both hunger and thirst above thresholds) and not carrying any resource.
+        # If the character is not satiated or is carrying something, they are not horny.
+        if char.hunger > HUNGER_THRESHOLD and char.thirst > THIRST_THRESHOLD and char.carrying is None:
+            # Chance to become horny each step (keeps reproduction from being guaranteed).
+            # Preserve existing horny state if already true.
+            if not char.horny:
+                # 10% chance per step when satiated to become horny
+                char.horny = random.random() < 0.1
+        else:
+            # Lose horny state if satiation is lost or carrying a resource
+            char.horny = False
+
+        # Reproduction requires two horny adjacent characters.  Only attempt if this character is horny and of
+        # reproductive age.  The character must still be reasonably satiated at the moment of reproduction.
+        if char.horny and char.age >= REPRODUCTION_AGE and char.hunger > HUNGER_THRESHOLD and char.thirst > THIRST_THRESHOLD:
+            # Scan neighbours for a potential partner who is also horny and of reproductive age
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = char.x + dx, char.y + dy
+                # Find a character at this position
+                partner = next((c for c in self.characters if c.x == nx and c.y == ny and c != char), None)
+                if partner and partner.horny and partner.age >= REPRODUCTION_AGE and partner.hunger > HUNGER_THRESHOLD and partner.thirst > THIRST_THRESHOLD:
+                    # Attempt reproduction based on global probability
+                    if random.random() < REPRODUCTION_PROBABILITY:
+                        # Find an empty tile adjacent to either parent to place the offspring
+                        placed = False
+                        for p in (char, partner):
+                            for ddx, ddy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                                ox, oy = p.x + ddx, p.y + ddy
+                                if 0 <= ox < self.width and 0 <= oy < self.height and self.is_empty(ox, oy):
+                                    offspring_name = generate_name()
+                                    self.add_character(offspring_name, ox, oy)
+                                    placed = True
+                                    break
+                            if placed:
+                                break
+                        # Reset horniness after reproduction
+                        char.horny = False
+                        partner.horny = False
                         break
         # Append memory snapshot for this step
         char.memory.append({
