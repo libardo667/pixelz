@@ -162,6 +162,12 @@ class Character:
         self.hunger: int = random.randint(5, 20)
         # Initialise thirst in the same range as hunger.  Characters will seek water when thirsty.
         self.thirst: int = random.randint(5, 20)
+        # ``horny`` indicates readiness to reproduce.  It is initially set based on
+        # being satiated at construction but will be updated each step in
+        # ``World.character_step``.  A character can only be horny when fully
+        # satiated (hunger and thirst above their thresholds) and not carrying
+        # any resource.  The initial value uses a 50% chance for variety but
+        # does not otherwise influence behaviour.
         self.horny: bool = self.hunger > HUNGER_THRESHOLD and self.thirst > THIRST_THRESHOLD and random.random() < 0.5
         # Resource currently being carried for deposit.  ``None`` means not carrying anything.
         self.carrying: Optional[str] = None
@@ -169,6 +175,8 @@ class Character:
         self.stockpile_target: Optional[str] = None
         self.memory: List[Dict[str, int | str]] = []
         self.ai_logs: List[str] = []
+        # Track mates and the number of times reproduced with each.  Key is partner id.
+        self.mates: Dict[int, int] = {}
 
     def state_snapshot(self) -> Dict[str, int | str]:
         """Return a dict representing the current state."""
@@ -384,6 +392,39 @@ class World:
                 return
         # If no valid move, stay
         return
+
+    def find_nearest_partner(self, char: Character) -> Optional[Tuple[int, int]]:
+        """
+        Determine the target coordinates of a partner for reproduction.
+
+        If the character has reproduced before, prefer the partner with the highest
+        count in the ``mates`` dictionary, provided that partner is still alive.
+        Otherwise, find the nearest horny character (by Manhattan distance)
+        who meets the reproductive age and satiation requirements.
+
+        Returns the coordinates of the target partner, or ``None`` if none found.
+        """
+        # Prioritise existing mates
+        # Sort mates by reproduction count descending
+        for partner_id, _count in sorted(char.mates.items(), key=lambda item: item[1], reverse=True):
+            for candidate in self.characters:
+                if candidate.id == partner_id and candidate is not char:
+                    # Partner may not currently be horny, but we still move toward them
+                    return (candidate.x, candidate.y)
+        # Otherwise, pick nearest horny partner
+        best_dist: Optional[int] = None
+        best_pos: Optional[Tuple[int, int]] = None
+        for candidate in self.characters:
+            if candidate is char:
+                continue
+            # Candidate must be of reproduction age and currently horny and satiated
+            if candidate.age >= REPRODUCTION_AGE and candidate.horny and \
+               candidate.hunger > HUNGER_THRESHOLD and candidate.thirst > THIRST_THRESHOLD:
+                dist = abs(candidate.x - char.x) + abs(candidate.y - char.y)
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best_pos = (candidate.x, candidate.y)
+        return best_pos
     
     def has_neighbors(self, char: Character) -> bool:
         """Check if the character has any adjacent characters (N, S, E, W)."""
@@ -414,6 +455,14 @@ class World:
         harvested = False
         drank = False
         deposited = False
+
+        # Update horny state based on satiation and carrying.  A character is horny
+        # only when fully fed, fully hydrated and not carrying a resource.
+        if char.hunger > HUNGER_THRESHOLD and char.thirst > THIRST_THRESHOLD and char.carrying is None:
+            char.horny = True
+        else:
+            char.horny = False
+
         # If carrying a resource, head to its stockpile
         if char.carrying:
             dest = self.stockpile_locations.get(char.carrying)
@@ -430,30 +479,38 @@ class World:
                     self.move_character(char, dest)
             # If no dest (shouldn't happen), drop resource and reset
         else:
-            # Determine desire based on thirst and hunger
-            if char.thirst < THIRST_THRESHOLD:
-                # Seek water when thirsty
-                desire_resources: List[str] = ["water"]
-            elif char.hunger < HUNGER_THRESHOLD:
-                # Seek food when hungry (trees or plants)
-                desire_resources = ["tree", "plant"]
+            # If the character is horny and of reproductive age, attempt to move toward a partner
+            partner_dest: Optional[Tuple[int, int]] = None
+            if char.horny and char.age >= REPRODUCTION_AGE:
+                partner_dest = self.find_nearest_partner(char)
+            if partner_dest:
+                # Move one step toward the partner
+                self.move_character(char, partner_dest)
             else:
-                # Satiated: choose a resource to stockpile if not already chosen
-                if char.stockpile_target is None:
-                    char.stockpile_target = random.choice(STOCKPILE_RESOURCES)
-                desire_resources = [char.stockpile_target]
-            dest = self.find_nearest(char, desire_resources)
-            if dest:
-                self.move_character(char, dest)
-            else:
-                # Random wander if no target found
-                dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)]
-                random.shuffle(dirs)
-                for dx, dy in dirs:
-                    nx, ny = char.x + dx, char.y + dy
-                    if 0 <= nx < self.width and 0 <= ny < self.height and self.is_empty(nx, ny):
-                        char.x, char.y = nx, ny
-                        break
+                # Determine desire based on thirst and hunger when not seeking a partner
+                if char.thirst < THIRST_THRESHOLD:
+                    # Seek water when thirsty
+                    desire_resources: List[str] = ["water"]
+                elif char.hunger < HUNGER_THRESHOLD:
+                    # Seek food when hungry (trees or plants)
+                    desire_resources = ["tree", "plant"]
+                else:
+                    # Satiated: choose a resource to stockpile if not already chosen
+                    if char.stockpile_target is None:
+                        char.stockpile_target = random.choice(STOCKPILE_RESOURCES)
+                    desire_resources = [char.stockpile_target]
+                dest = self.find_nearest(char, desire_resources)
+                if dest:
+                    self.move_character(char, dest)
+                else:
+                    # Random wander if no target found
+                    dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+                    random.shuffle(dirs)
+                    for dx, dy in dirs:
+                        nx, ny = char.x + dx, char.y + dy
+                        if 0 <= nx < self.width and 0 <= ny < self.height and self.is_empty(nx, ny):
+                            char.x, char.y = nx, ny
+                            break
             # Evaluate the tile after movement if not carrying
             tile_resource = self.tiles[char.x][char.y]
             # Drinking water when thirsty
@@ -470,7 +527,7 @@ class World:
                 self.tiles[char.x][char.y] = "empty"
                 self.regrowth[(char.x, char.y)] = (tile_resource, REGROW_STEPS[tile_resource])
                 harvested = True
-            # Harvesting trees, plants or stone for stockpile when satiated
+            # Harvesting trees, plants or stone for stockpile when satiated and not seeking partner
             elif tile_resource in ("tree", "plant", "stone"):
                 # Only harvest if the resource matches the stockpile target
                 # or if no target (for stone we always harvest when satiated)
@@ -480,46 +537,45 @@ class World:
                     self.tiles[char.x][char.y] = "empty"
                     self.regrowth[(char.x, char.y)] = (tile_resource, REGROW_STEPS[tile_resource])
                     harvested = True
-        # Update horniness state based on satiation.  Characters only become
-        # "horny" when fully satiated (both hunger and thirst above thresholds) and not carrying any resource.
-        # If the character is not satiated or is carrying something, they are not horny.
-        if char.hunger > HUNGER_THRESHOLD and char.thirst > THIRST_THRESHOLD and char.carrying is None:
-            # Chance to become horny each step (keeps reproduction from being guaranteed).
-            # Preserve existing horny state if already true.
-            if not char.horny:
-                # 10% chance per step when satiated to become horny
-                char.horny = random.random() < 0.1
-        else:
-            # Lose horny state if satiation is lost or carrying a resource
-            char.horny = False
 
-        # Reproduction requires two horny adjacent characters.  Only attempt if this character is horny and of
-        # reproductive age.  The character must still be reasonably satiated at the moment of reproduction.
-        if char.horny and char.age >= REPRODUCTION_AGE and char.hunger > HUNGER_THRESHOLD and char.thirst > THIRST_THRESHOLD:
-            # Scan neighbours for a potential partner who is also horny and of reproductive age
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                nx, ny = char.x + dx, char.y + dy
-                # Find a character at this position
-                partner = next((c for c in self.characters if c.x == nx and c.y == ny and c != char), None)
-                if partner and partner.horny and partner.age >= REPRODUCTION_AGE and partner.hunger > HUNGER_THRESHOLD and partner.thirst > THIRST_THRESHOLD:
-                    # Attempt reproduction based on global probability
-                    if random.random() < REPRODUCTION_PROBABILITY:
-                        # Find an empty tile adjacent to either parent to place the offspring
-                        placed = False
-                        for p in (char, partner):
-                            for ddx, ddy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                                ox, oy = p.x + ddx, p.y + ddy
-                                if 0 <= ox < self.width and 0 <= oy < self.height and self.is_empty(ox, oy):
-                                    offspring_name = generate_name()
-                                    self.add_character(offspring_name, ox, oy)
-                                    placed = True
-                                    break
-                            if placed:
-                                break
-                        # Reset horniness after reproduction
-                        char.horny = False
-                        partner.horny = False
-                        break
+            # Attempt reproduction after movement and evaluation.  Only if still horny,
+            # at reproductive age and satiated, and adjacent to a suitable partner.
+            if char.horny and char.age >= REPRODUCTION_AGE and char.hunger > HUNGER_THRESHOLD and char.thirst > THIRST_THRESHOLD:
+                # Check adjacent tiles for partner
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    nx, ny = char.x + dx, char.y + dy
+                    # Look for partner character at this location
+                    for partner in self.characters:
+                        if partner is char:
+                            continue
+                        if partner.x == nx and partner.y == ny and partner.age >= REPRODUCTION_AGE and partner.horny and partner.hunger > HUNGER_THRESHOLD and partner.thirst > THIRST_THRESHOLD and partner.carrying is None:
+                            # Reproduction occurs with a probability
+                            if random.random() < REPRODUCTION_PROBABILITY:
+                                # Find an empty adjacent tile for offspring near either parent
+                                placed = False
+                                for parent in (char, partner):
+                                    for dx2, dy2 in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                                        bx, by = parent.x + dx2, parent.y + dy2
+                                        if 0 <= bx < self.width and 0 <= by < self.height and self.is_empty(bx, by):
+                                            offspring_name = generate_name()
+                                            self.add_character(offspring_name, bx, by)
+                                            placed = True
+                                            break
+                                    if placed:
+                                        break
+                                # Record mating counts
+                                char.mates[partner.id] = char.mates.get(partner.id, 0) + 1
+                                partner.mates[char.id] = partner.mates.get(char.id, 0) + 1
+                                # Reset horny state for both
+                                char.horny = False
+                                partner.horny = False
+                            # Once interaction attempted, break inner loops
+                            break
+                    else:
+                        # continue outer loop if no partner found at this offset
+                        continue
+                    # If partner found and reproduction attempted, break the outer loop
+                    break
         # Append memory snapshot for this step
         char.memory.append({
             "step": char.age,
@@ -928,13 +984,18 @@ class WorldGUI:
 
     def show_character_popup(self, char: Character) -> None:
         """
-        Display a small popup showing the latest AI log for the character.
-        The popup first shows a loading message, then after a short
-        delay generates a new AI log and displays all logs.
+        Display a small popup showing the full JSON state of the character.
+
+        When the user clicks on a character, the simulation pauses and a
+        window pops up containing a JSON dump of the character's current
+        state.  The JSON includes position, hunger, thirst, carrying
+        status, mates information and memory.  No AI log generation is
+        performed here; this function simply prints the raw state so the
+        player can understand what the character is doing.
         """
         popup = tk.Toplevel(self.root)
-        popup.title(f"{char.name} (ID {char.id}) Logs")
-        popup.geometry("350x250")
+        popup.title(f"{char.name} (ID {char.id}) State")
+        popup.geometry("400x300")
         popup.transient(self.root)
         popup.grab_set()
 
@@ -942,22 +1003,32 @@ class WorldGUI:
         if not self.paused:
             self.toggle_pause()
 
-        loading_label = tk.Label(popup, text="Gathering data ⚙️ 🔨 🩻", font=("Arial", 12))
-        loading_label.pack(pady=20)
+        # Ensure the character's state is saved to disk (memory, logs etc.)
+        # Save current state for up-to-date information
+        char.save_state()
 
-        def show_logs():
-            loading_label.destroy()
-            # Generate a new AI log entry (simulate)
-            generate_ai_log_for_character(char)
-            # Display logs
-            if char.ai_logs:
-                text_widget = tk.Text(popup, wrap="word", height=10, width=40)
-                text_widget.pack(padx=10, pady=10, fill="both", expand=True)
-                text_widget.insert("1.0", "\n\n".join(char.ai_logs))
-                text_widget.configure(state="disabled")
-            else:
-                no_log = tk.Label(popup, text="No AI logs yet.")
-                no_log.pack(pady=20)
+        # Build a dictionary of the character's current state for display
+        state_data = {
+            "id": char.id,
+            "name": char.name,
+            "age": char.age,
+            "position": {"x": char.x, "y": char.y},
+            "hunger": char.hunger,
+            "thirst": char.thirst,
+            "carrying": char.carrying,
+            "stockpile_target": char.stockpile_target,
+            "horny": char.horny,
+            "mates": char.mates,
+            "memory": char.memory,
+        }
+        # Convert to formatted JSON string
+        json_text = json.dumps(state_data, indent=2)
+
+        # Display the JSON in a read-only text widget
+        text_widget = tk.Text(popup, wrap="word", height=15, width=50)
+        text_widget.pack(padx=10, pady=10, fill="both", expand=True)
+        text_widget.insert("1.0", json_text)
+        text_widget.configure(state="disabled")
 
         # When popup is closed, resume simulation if paused
         def on_close() -> None:
@@ -969,8 +1040,6 @@ class WorldGUI:
                     self.toggle_pause()
 
         popup.protocol("WM_DELETE_WINDOW", on_close)
-        # Generate logs after a short delay
-        self.root.after(700, show_logs)
 
 
 def main() -> None:
